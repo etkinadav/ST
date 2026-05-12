@@ -1,0 +1,13 @@
+{
+  "name": "screen-translator",
+  "version": "0.1.0",
+  "description": "Tray-only Electron app that captures the primary screen on a global shortcut.",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^32.0.0"
+  }
+}
