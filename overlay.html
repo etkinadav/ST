@@ -33,10 +33,11 @@
         border-radius: 6px;
         padding: 2px 6px;
         box-sizing: border-box;
-        line-height: 1.1;
+        line-height: 1;
+        white-space: nowrap;
         overflow: hidden;
-        white-space: pre-wrap;
-        word-break: break-word;
+        text-overflow: clip;
+        word-break: normal;
         box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
         pointer-events: none;
       }
@@ -98,14 +99,49 @@
         }
       });
 
-      function clampFontSize(boxHeight, text) {
-        // Fit roughly inside the box; account for padding (~4px).
-        let size = Math.max(10, Math.min(48, Math.floor(boxHeight * 0.75) - 2));
-        // Long text in a thin box: cap further.
-        if (text && text.length > 0) {
-          size = Math.min(size, 48);
+      /** Matches .ocr-item padding: 2px 6px (border-box). */
+      const PAD_X = 12;
+      const PAD_Y = 4;
+      const MIN_FONT_PX = 8;
+      const FONT_FAMILY = '"Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif';
+
+      const measureCanvas = document.createElement('canvas');
+      const measureCtx = measureCanvas.getContext('2d');
+      if (!measureCtx) {
+        console.error('Overlay: canvas 2d context unavailable for text measurement');
+      }
+
+      /**
+       * Single-line font fit using canvas measureText (width scales ~linearly with font size).
+       * initialFontSize = boxHeight * 0.85; if measuredWidth > innerWidth, scale down; floor at 8px.
+       */
+      function fitFontSizeToSingleLine(text, boxWidth, boxHeight) {
+        const innerW = Math.max(1, boxWidth - PAD_X);
+        const innerH = Math.max(1, boxHeight - PAD_Y);
+        const t = text || '';
+        if (!measureCtx) {
+          return Math.max(MIN_FONT_PX, Math.min(boxHeight * 0.85, innerH));
         }
-        return size;
+        let initialFontSize = boxHeight * 0.85;
+        let fontSize = Math.max(MIN_FONT_PX, initialFontSize);
+
+        measureCtx.font = `${fontSize}px ${FONT_FAMILY}`;
+        let measuredWidth = measureCtx.measureText(t).width;
+        if (measuredWidth > innerW && measuredWidth > 0) {
+          fontSize = fontSize * (innerW / measuredWidth);
+        }
+        fontSize = Math.max(fontSize, MIN_FONT_PX);
+
+        measureCtx.font = `${fontSize}px ${FONT_FAMILY}`;
+        measuredWidth = measureCtx.measureText(t).width;
+        if (measuredWidth > innerW && measuredWidth > 0) {
+          fontSize = Math.max(MIN_FONT_PX, fontSize * (innerW / measuredWidth));
+        }
+
+        if (fontSize > innerH) {
+          fontSize = Math.max(MIN_FONT_PX, innerH);
+        }
+        return fontSize;
       }
 
       function renderItems(payload) {
@@ -149,8 +185,10 @@
           el.style.top = top + 'px';
           el.style.width = width + 'px';
           el.style.height = height + 'px';
-          el.style.fontSize = clampFontSize(height, item.description || '') + 'px';
-          el.textContent = item.description || '';
+          const text = item.description || '';
+          const fontPx = fitFontSizeToSingleLine(text, width, height);
+          el.style.fontSize = fontPx + 'px';
+          el.textContent = text;
           stage.appendChild(el);
           placed++;
         }
