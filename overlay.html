@@ -8,8 +8,6 @@
       body {
         margin: 0;
         padding: 0;
-        width: 100vw;
-        height: 100vh;
         overflow: hidden;
         background: transparent;
         font-family: "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
@@ -109,8 +107,15 @@
         return size;
       }
 
-      function renderItems(items, imageWidth, imageHeight) {
+      function renderItems(payload) {
         stage.innerHTML = '';
+
+        const { items, overlayWidth, overlayHeight, scaleX, scaleY } = payload;
+
+        document.documentElement.style.width = `${overlayWidth}px`;
+        document.documentElement.style.height = `${overlayHeight}px`;
+        document.body.style.width = `${overlayWidth}px`;
+        document.body.style.height = `${overlayHeight}px`;
 
         if (!items || items.length === 0) {
           const msg = document.createElement('div');
@@ -119,11 +124,6 @@
           document.body.appendChild(msg);
           return 0;
         }
-
-        const overlayW = window.innerWidth;
-        const overlayH = window.innerHeight;
-        const scaleX = overlayW / Math.max(1, imageWidth);
-        const scaleY = overlayH / Math.max(1, imageHeight);
 
         let placed = 0;
         for (const item of items) {
@@ -164,8 +164,7 @@
             closeOverlay();
             return;
           }
-          const { items, imageWidth, imageHeight } = payload;
-          const count = renderItems(items, imageWidth, imageHeight);
+          const count = renderItems(payload);
           ipcRenderer.send('overlay:ready', count);
         } catch (err) {
           ipcRenderer.send('overlay:ready', 0);

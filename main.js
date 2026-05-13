@@ -22,7 +22,17 @@ const CAPTURES_DIR = path.join(app.getPath('documents'), 'screen-translator-capt
 let tray = null;
 /** @type {import('electron').BrowserWindow | null} */
 let overlayWin = null;
-/** @type {{ items: any[], imageWidth: number, imageHeight: number } | null} */
+/**
+ * @type {{
+ *   items: any[];
+ *   screenshotImageWidth: number;
+ *   screenshotImageHeight: number;
+ *   overlayWidth: number;
+ *   overlayHeight: number;
+ *   scaleX: number;
+ *   scaleY: number;
+ * } | null}
+ */
 let overlayData = null;
 
 function timestamp() {
@@ -96,19 +106,36 @@ function showOverlay(items, imageDims) {
   closeOverlay();
 
   const primary = screen.getPrimaryDisplay();
-  const { x, y, width, height } = primary.bounds;
+  const { bounds, workArea } = primary;
+
+  const screenshotW = imageDims && imageDims.width ? imageDims.width : bounds.width;
+  const screenshotH = imageDims && imageDims.height ? imageDims.height : bounds.height;
+
+  const overlayWidth = bounds.width;
+  const overlayHeight = bounds.height;
+  const scaleX = overlayWidth / Math.max(1, screenshotW);
+  const scaleY = overlayHeight / Math.max(1, screenshotH);
+
+  console.log('Overlay display bounds', JSON.stringify(bounds));
+  console.log('Overlay display workArea', JSON.stringify(workArea));
+  console.log('Overlay screenshot image size', screenshotW, screenshotH);
+  console.log('Overlay scaleX', scaleX, 'scaleY', scaleY);
 
   overlayData = {
     items: items || [],
-    imageWidth: imageDims && imageDims.width ? imageDims.width : width,
-    imageHeight: imageDims && imageDims.height ? imageDims.height : height,
+    screenshotImageWidth: screenshotW,
+    screenshotImageHeight: screenshotH,
+    overlayWidth,
+    overlayHeight,
+    scaleX,
+    scaleY,
   };
 
   overlayWin = new BrowserWindow({
-    x,
-    y,
-    width,
-    height,
+    x: bounds.x,
+    y: bounds.y,
+    width: bounds.width,
+    height: bounds.height,
     frame: false,
     transparent: true,
     resizable: false,
@@ -138,6 +165,12 @@ function showOverlay(items, imageDims) {
   });
 
   overlayWin.once('ready-to-show', () => {
+    overlayWin.setBounds({
+      x: bounds.x,
+      y: bounds.y,
+      width: bounds.width,
+      height: bounds.height,
+    });
     overlayWin.show();
     overlayWin.focus();
     console.log('Overlay opened');
@@ -184,13 +217,15 @@ async function takeScreenshot() {
       throw new Error('Captured image was empty');
     }
 
+    const { width: actualW, height: actualH } = nativeImage.createFromBuffer(pngBuffer).getSize();
+
     const filename = `screenshot-${timestamp()}.png`;
     const filepath = path.join(CAPTURES_DIR, filename);
     fs.writeFileSync(filepath, pngBuffer);
 
     console.log('Screenshot saved', filepath);
 
-    await runOcrForScreenshot(filepath, { width: imageWidth, height: imageHeight });
+    await runOcrForScreenshot(filepath, { width: actualW, height: actualH });
 
     return filepath;
   } catch (err) {
