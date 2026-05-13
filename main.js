@@ -14,7 +14,7 @@ const {
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
-const { runOcrOnImageBuffer, formatOcrTextReport, stringifyRawResponse, buildLineOverlayItems } = require('./googleVision.js');
+const { runOcrOnImageBuffer, formatOcrTextReport, stringifyRawResponse, buildLineOverlayItems, getOcrMode } = require('./googleVision.js');
 const { translateOcrLineItems, DEFAULT_TARGET_LANGUAGE, initTranslateService } = require('./translateService.js');
 
 const SHORTCUT = 'CommandOrControl+Shift+Z';
@@ -179,6 +179,51 @@ function ensureCapturesDir() {
   fs.mkdirSync(CAPTURES_DIR, { recursive: true });
 }
 
+/**
+ * Downscale screenshot for OCR upload: longest edge ≤ maxEdge, JPEG.
+ * Cuts Vision RPC time by reducing bytes-on-wire and pixels-to-scan.
+ * @param {Buffer} pngBuffer
+ * @param {number} srcW
+ * @param {number} srcH
+ * @param {number} maxEdge
+ * @param {number} jpegQuality 0-100
+ * @returns {{ buffer: Buffer; width: number; height: number; format: 'jpeg' | 'png'; bytes: number }}
+ */
+function downscaleToJpegForOcr(pngBuffer, srcW, srcH, maxEdge, jpegQuality) {
+  const longest = Math.max(srcW, srcH);
+  if (!Number.isFinite(maxEdge) || maxEdge <= 0 || longest <= maxEdge) {
+    let buffer = pngBuffer;
+    let format = 'png';
+    try {
+      const img = nativeImage.createFromBuffer(pngBuffer);
+      const jpeg = img.toJPEG(Math.max(1, Math.min(100, jpegQuality || 82)));
+      if (jpeg && jpeg.length > 0 && jpeg.length < pngBuffer.length) {
+        buffer = jpeg;
+        format = 'jpeg';
+      }
+    } catch (_) {
+      // keep PNG fallback
+    }
+    return { buffer, width: srcW, height: srcH, format, bytes: buffer.length };
+  }
+
+  const ratio = maxEdge / longest;
+  const targetW = Math.max(1, Math.round(srcW * ratio));
+  const targetH = Math.max(1, Math.round(srcH * ratio));
+  try {
+    const img = nativeImage.createFromBuffer(pngBuffer);
+    const resized = img.resize({ width: targetW, height: targetH, quality: 'good' });
+    const size = resized.getSize();
+    const jpeg = resized.toJPEG(Math.max(1, Math.min(100, jpegQuality || 82)));
+    if (jpeg && jpeg.length > 0) {
+      return { buffer: jpeg, width: size.width, height: size.height, format: 'jpeg', bytes: jpeg.length };
+    }
+  } catch (err) {
+    console.error('[error] OCR downscale failed; sending raw PNG:', err.message || err);
+  }
+  return { buffer: pngBuffer, width: srcW, height: srcH, format: 'png', bytes: pngBuffer.length };
+}
+
 /** @param {string} pngPath e.g. .../screenshot-2026-05-12-10-00-00.png */
 function ocrSidecarPaths(pngPath) {
   const base = path.basename(pngPath, '.png');
@@ -265,7 +310,15 @@ async function takeScreenshot() {
     perfDetail('capture_png_dimensions', `${actualW}x${actualH}`);
 
     perfLap(perf, 'screenshot_capture');
-    const imageDims = { width: actualW, height: actualH };
+
+    const ocrMaxEdge = Number(process.env.OCR_MAX_EDGE) || 1280;
+    const ocrJpegQuality = Number(process.env.OCR_JPEG_QUALITY) || 82;
+    const ocr = downscaleToJpegForOcr(pngBuffer, actualW, actualH, ocrMaxEdge, ocrJpegQuality);
+    const imageDims = { width: ocr.width, height: ocr.height };
+    perfDetail('ocr_payload_dimensions', `${ocr.width}x${ocr.height} from ${actualW}x${actualH}`);
+    perfDetail('ocr_payload_bytes', ocr.bytes);
+    perfDetail('ocr_payload_format', ocr.format);
+    perfLap(perf, 'ocr_payload_prepare');
 
     let filepath = null;
     if (DEBUG_OCR) {
@@ -273,6 +326,10 @@ async function takeScreenshot() {
       filepath = path.join(CAPTURES_DIR, filename);
       fs.writeFileSync(filepath, pngBuffer);
       console.log('[debug] Screenshot saved', filepath);
+      const ocrFilename = `ocr-${timestamp()}.${ocr.format === 'jpeg' ? 'jpg' : 'png'}`;
+      const ocrPath = path.join(CAPTURES_DIR, ocrFilename);
+      fs.writeFileSync(ocrPath, ocr.buffer);
+      console.log('[debug] OCR payload saved', ocrPath);
       perfLap(perf, 'debug_image_save');
     } else {
       console.log('[perf] debug_image_save: skipped (DEBUG_OCR not true)');
@@ -300,16 +357,20 @@ async function takeScreenshot() {
 
       try {
         perfDetail('pipeline_async_start', {
-          pngBytes: pngBuffer.length,
+          ocrBytes: ocr.buffer.length,
+          ocrFormat: ocr.format,
           imageDims: `${screenshotW}x${screenshotH}`,
         });
         console.log('OCR started', DEBUG_OCR && filepath ? filepath : '(memory only)');
-        const ocr = await runOcrOnImageBuffer(pngBuffer);
+        const ocrRes = await runOcrOnImageBuffer(ocr.buffer);
+        if (ocrRes.success) {
+          perfDetail('vision_ocr_mode_used', ocrRes.ocrMode || getOcrMode());
+        }
         perfLap(perf, 'google_vision_ocr');
 
-        if (ocr.success && ocr.rawResponse) {
-          const fta = ocr.rawResponse.fullTextAnnotation;
-          const ta = ocr.rawResponse.textAnnotations || [];
+        if (ocrRes.success && ocrRes.rawResponse) {
+          const fta = ocrRes.rawResponse.fullTextAnnotation;
+          const ta = ocrRes.rawResponse.textAnnotations || [];
           perfDetail('vision_response_summary', {
             pages: fta && fta.pages ? fta.pages.length : 0,
             has_fullTextAnnotation: !!fta,
@@ -318,17 +379,17 @@ async function takeScreenshot() {
           });
         }
 
-        if (DEBUG_OCR && filepath && ocr.success) {
+        if (DEBUG_OCR && filepath && ocrRes.success) {
           const { jsonPath, txtPath } = ocrSidecarPaths(filepath);
           setImmediate(() => {
             try {
-              fs.writeFileSync(jsonPath, stringifyRawResponse(ocr.rawResponse), 'utf8');
+              fs.writeFileSync(jsonPath, stringifyRawResponse(ocrRes.rawResponse), 'utf8');
               console.log('[debug] OCR JSON saved', jsonPath);
             } catch (err) {
               console.error('OCR error', 'failed to write JSON:', err.message || err);
             }
             try {
-              fs.writeFileSync(txtPath, formatOcrTextReport(ocr.rawResponse), 'utf8');
+              fs.writeFileSync(txtPath, formatOcrTextReport(ocrRes.rawResponse, imageDims), 'utf8');
               console.log('[debug] OCR TXT saved', txtPath);
             } catch (err) {
               console.error('OCR error', 'failed to write TXT:', err.message || err);
@@ -336,11 +397,11 @@ async function takeScreenshot() {
           });
         }
 
-        if (!ocr.success) {
-          console.error('OCR error', ocr.error, ocr.code != null ? `(code ${ocr.code})` : '');
+        if (!ocrRes.success) {
+          console.error('OCR error', ocrRes.error, ocrRes.code != null ? `(code ${ocrRes.code})` : '');
           safeNotify({
             loading: false,
-            errorMessage: String(ocr.error || 'OCR failed'),
+            errorMessage: String(ocrRes.error || 'OCR failed'),
             items: [],
             screenshotImageWidth: screenshotW,
             screenshotImageHeight: screenshotH,
@@ -355,7 +416,7 @@ async function takeScreenshot() {
 
         console.log('OCR finished', DEBUG_OCR && filepath ? filepath : '(memory)');
 
-        const lineItems = buildLineOverlayItems(ocr.rawResponse, imageDims);
+        const lineItems = buildLineOverlayItems(ocrRes.rawResponse, imageDims);
         perfDetail('ocr_line_groups_count', lineItems.length);
         perfLap(perf, 'ocr_parse_group');
 
@@ -380,7 +441,25 @@ async function takeScreenshot() {
         perfDetail('overlay_hebrew_items_for_display', overlayItems.length);
         perfLap(perf, 'overlay_payload_notify');
 
-        console.log(`[perf] total_ms: ${(performance.now() - perf.t0).toFixed(1)}`);
+        const ann = ocrRes.rawResponse && ocrRes.rawResponse.textAnnotations;
+        const visionAnnotationCount = Array.isArray(ann) ? ann.length : 0;
+        const totalMs = Number((performance.now() - perf.t0).toFixed(1));
+        console.log('[perf] ocr_pipeline_summary', {
+          ocr_mode: ocrRes.ocrMode,
+          ocr_rpc_ms: ocrRes.ocrRpcMs != null ? Number(ocrRes.ocrRpcMs.toFixed(1)) : null,
+          pipeline_total_ms: totalMs,
+          vision_textAnnotations_count: visionAnnotationCount,
+          ocr_grouped_items_count: lineItems.length,
+          overlay_translated_items_count: overlayItems.length,
+        });
+        console.log(
+          '[perf-detail] vision_quality_note',
+          ocrRes.ocrMode === 'text'
+            ? 'textDetection: typically faster RPC; Vision returns textAnnotations only (no fullText page hierarchy). Grouping uses the same app pipeline from boxes — bubble boundaries may differ vs documentTextDetection.'
+            : 'documentTextDetection: fullTextAnnotation with pages/blocks/words; richer geometry, usually slower RPC.',
+        );
+
+        console.log(`[perf] total_ms: ${totalMs}`);
       } catch (err) {
         console.error('Pipeline error', err.message || err);
         safeNotify({

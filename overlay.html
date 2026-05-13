@@ -48,13 +48,18 @@
         border-radius: 6px;
         padding: 2px 6px;
         box-sizing: border-box;
-        line-height: 1;
+        line-height: 1.18;
         white-space: nowrap;
-        overflow: hidden;
-        text-overflow: clip;
+        overflow: visible;
         word-break: normal;
         box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
         pointer-events: none;
+      }
+
+      .ocr-item.ocr-item--wrap {
+        white-space: normal;
+        overflow-wrap: break-word;
+        word-break: normal;
       }
 
       #close-btn {
@@ -118,7 +123,8 @@
 
       const PAD_X = 12;
       const PAD_Y = 4;
-      const MIN_FONT_PX = 16;
+      /** כל טקסטי ה־overlay באותו גודל גופן */
+      const FONT_PX = 16;
       const FONT_FAMILY = '"Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif';
 
       const measureCanvas = document.createElement('canvas');
@@ -127,33 +133,54 @@
         console.error('Overlay: canvas 2d context unavailable for text measurement');
       }
 
-      function fitFontSizeToSingleLine(text, boxWidth, boxHeight) {
-        const innerW = Math.max(1, boxWidth - PAD_X);
-        const innerH = Math.max(1, boxHeight - PAD_Y);
+      function measureTextLineHeight(fontPx) {
+        return Math.ceil(fontPx * 1.2 + 2);
+      }
+
+      function measureTextWidth(fontPx, text) {
+        if (!measureCtx) return (text || '').length * fontPx * 0.55;
+        measureCtx.font = `${fontPx}px ${FONT_FAMILY}`;
+        return measureCtx.measureText(text || '').width;
+      }
+
+      /**
+       * גודל גופן קבוע 16px; קופסה מתרחבת / עוטפת לפי אורך הטקסט.
+       * @returns {{ width: number; height: number; left: number; top: number; wrap: boolean }}
+       */
+      function layoutExpandedLabel(text, baseW, baseH, left, top, overlayWidth, overlayHeight) {
         const t = text || '';
-        if (!measureCtx) {
-          return Math.max(MIN_FONT_PX, Math.min(boxHeight * 0.85, innerH));
-        }
-        let initialFontSize = boxHeight * 0.85;
-        let fontSize = Math.max(MIN_FONT_PX, initialFontSize);
+        const fontPx = FONT_PX;
+        const lineH = measureTextLineHeight(fontPx);
+        const textW = measureTextWidth(fontPx, t);
 
-        measureCtx.font = `${fontSize}px ${FONT_FAMILY}`;
-        let measuredWidth = measureCtx.measureText(t).width;
-        if (measuredWidth > innerW && measuredWidth > 0) {
-          fontSize = fontSize * (innerW / measuredWidth);
-        }
-        fontSize = Math.max(fontSize, MIN_FONT_PX);
+        const availableRight = Math.max(0, overlayWidth - left);
+        const widthCap = Math.min(
+          availableRight,
+          Math.max(baseW * 2.2, 360),
+        );
 
-        measureCtx.font = `${fontSize}px ${FONT_FAMILY}`;
-        measuredWidth = measureCtx.measureText(t).width;
-        if (measuredWidth > innerW && measuredWidth > 0) {
-          fontSize = Math.max(MIN_FONT_PX, fontSize * (innerW / measuredWidth));
+        let width;
+        let height;
+        let wrap = false;
+        if (textW + PAD_X <= widthCap) {
+          width = Math.max(baseW, Math.ceil(textW + PAD_X));
+          height = Math.max(baseH, Math.ceil(lineH + PAD_Y));
+        } else {
+          width = Math.max(baseW, Math.ceil(widthCap));
+          const innerW = Math.max(1, width - PAD_X);
+          const linesNeeded = Math.max(1, Math.ceil((textW + innerW * 0.05) / innerW));
+          height = Math.max(baseH, Math.ceil(lineH * linesNeeded + PAD_Y));
+          wrap = true;
         }
 
-        if (fontSize > innerH) {
-          fontSize = Math.max(MIN_FONT_PX, innerH);
-        }
-        return fontSize;
+        let l = left;
+        let tt = top;
+        if (l + width > overlayWidth) l = Math.max(0, overlayWidth - width);
+        if (tt + height > overlayHeight) tt = Math.max(0, overlayHeight - height);
+        if (l < 0) l = 0;
+        if (tt < 0) tt = 0;
+
+        return { width, height, left: l, top: tt, wrap };
       }
 
       function setLoadingVisible(on) {
@@ -192,22 +219,23 @@
 
           const left = minX * scaleX;
           const top = minY * scaleY;
-          const width = Math.max(8, (maxX - minX) * scaleX);
-          const height = Math.max(8, (maxY - minY) * scaleY);
+          const baseW = Math.max(8, (maxX - minX) * scaleX);
+          const baseH = Math.max(8, (maxY - minY) * scaleY);
 
           const el = document.createElement('div');
           el.className = 'ocr-item';
-          el.style.left = left + 'px';
-          el.style.top = top + 'px';
-          el.style.width = width + 'px';
-          el.style.height = height + 'px';
           const text = item.translatedText != null ? String(item.translatedText).trim() : '';
           if (!text) {
             continue;
           }
-          const fontPx = fitFontSizeToSingleLine(text, width, height);
-          el.style.fontSize = fontPx + 'px';
+          const lay = layoutExpandedLabel(text, baseW, baseH, left, top, overlayWidth, overlayHeight);
+          el.style.left = lay.left + 'px';
+          el.style.top = lay.top + 'px';
+          el.style.width = lay.width + 'px';
+          el.style.height = lay.height + 'px';
+          el.style.fontSize = FONT_PX + 'px';
           el.style.direction = item.sourceWasRtl ? 'rtl' : 'ltr';
+          if (lay.wrap) el.classList.add('ocr-item--wrap');
           el.textContent = text;
           stage.appendChild(el);
           placed++;

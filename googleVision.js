@@ -488,39 +488,65 @@ function collectWordsFromPage(page, imgW, imgH) {
 }
 
 /**
- * Regions (sidebar vs main) → visual lines → horizontal runs → message blocks → noise filter.
- * @param {Record<string, unknown>} fullText
- * @param {{ width: number; height: number }} imageDims
- * @returns {Array<{ description: string; boundingPoly: { vertices: { x: number; y: number }[] }; words: object[] }>}
+ * OCR_MODE=document → documentTextDetection.
+ * OCR_MODE=text → textDetection (default for speed comparison vs document).
  */
-function buildLineGroupsFromFullText(fullText, imageDims) {
-  const imgW = imageDims.width || 1;
-  const imgH = imageDims.height || 1;
-  const pages = fullText.pages || [];
+function getOcrMode() {
+  const m = String(process.env.OCR_MODE || 'text')
+    .trim()
+    .toLowerCase();
+  if (m === 'document') return 'document';
+  return 'text';
+}
 
-  /** @type {Array<{ description: string; boundingPoly: { vertices: { x: number; y: number }[] }; words: object[] }>} */
-  const items = [];
-  let totalWords = 0;
-  const stats = {
-    verticalCount: 0,
-    lineRunCount: 0,
-    blockCount: 0,
-    itemCount: 0,
-    sidebarWords: 0,
-    mainWords: 0,
-  };
-
-  for (const page of pages) {
-    const parsed = collectWordsFromPage(page, imgW, imgH);
-    totalWords += parsed.length;
-    const { sidebar, main } = splitWordsByScreenRegion(parsed, imgW);
-    stats.sidebarWords += sidebar.length;
-    stats.mainWords += main.length;
-
-    items.push(...buildOverlayItemsForRegion(sidebar, 'sidebar', stats));
-    items.push(...buildOverlayItemsForRegion(main, 'main', stats));
+/**
+ * @param {Record<string, unknown>} result
+ * @returns {Array<{ text: string; rect: object; word: object }>}
+ */
+function parsedWordsFromTextAnnotations(result) {
+  const annotations = result.textAnnotations || [];
+  const words = annotations.slice(1);
+  /** @type {Array<{ text: string; rect: object; word: object }>} */
+  const out = [];
+  for (const ann of words) {
+    const text = (ann.description != null ? String(ann.description) : '').trim();
+    const verts = ann.boundingPoly && ann.boundingPoly.vertices;
+    if (!text || !verts || verts.length === 0) continue;
+    const xs = verts.map((v) => Number(v.x) || 0);
+    const ys = verts.map((v) => Number(v.y) || 0);
+    const rect = {
+      minX: Math.min(...xs),
+      minY: Math.min(...ys),
+      maxX: Math.max(...xs),
+      maxY: Math.max(...ys),
+    };
+    out.push({ text, rect, word: ann });
   }
+  return out;
+}
 
+/**
+ * @param {Array<{ text: string; rect: object; word: object }>} parsed
+ * @param {{ width: number; height: number }} imageDims
+ * @param {Array<{ description: string; boundingPoly: { vertices: { x: number; y: number }[] }; words: object[] }>} items
+ * @param {{ verticalCount: number; lineRunCount: number; blockCount: number; itemCount: number; sidebarWords: number; mainWords: number }} stats
+ */
+function appendGroupedOcrFromParsedWords(parsed, imageDims, items, stats) {
+  if (!parsed || parsed.length === 0) return;
+  const imgW = imageDims.width || 1;
+  const { sidebar, main } = splitWordsByScreenRegion(parsed, imgW);
+  stats.sidebarWords += sidebar.length;
+  stats.mainWords += main.length;
+  items.push(...buildOverlayItemsForRegion(sidebar, 'sidebar', stats));
+  items.push(...buildOverlayItemsForRegion(main, 'main', stats));
+}
+
+/**
+ * @param {Array<{ description: string; boundingPoly: { vertices: { x: number; y: number }[] }; words: object[] }>} items
+ * @param {{ verticalCount: number; lineRunCount: number; blockCount: number; itemCount: number; sidebarWords: number; mainWords: number }} stats
+ * @param {number} totalWords
+ */
+function sortAndLogOcrGroupedItems(items, stats, totalWords) {
   items.sort((a, b) => {
     const va = a.boundingPoly && a.boundingPoly.vertices;
     const vb = b.boundingPoly && b.boundingPoly.vertices;
@@ -552,7 +578,64 @@ function buildLineGroupsFromFullText(fullText, imageDims) {
     return { text: it.description, boundingBox };
   });
   console.log('[ocr-group] first_10_grouped_lines_with_boxes', sample);
+}
 
+/**
+ * Regions (sidebar vs main) → visual lines → horizontal runs → message blocks → noise filter.
+ * @param {Record<string, unknown>} fullText
+ * @param {{ width: number; height: number }} imageDims
+ * @returns {Array<{ description: string; boundingPoly: { vertices: { x: number; y: number }[] }; words: object[] }>}
+ */
+function buildLineGroupsFromFullText(fullText, imageDims) {
+  const imgW = imageDims.width || 1;
+  const imgH = imageDims.height || 1;
+  const pages = fullText.pages || [];
+
+  /** @type {Array<{ description: string; boundingPoly: { vertices: { x: number; y: number }[] }; words: object[] }>} */
+  const items = [];
+  let totalWords = 0;
+  const stats = {
+    verticalCount: 0,
+    lineRunCount: 0,
+    blockCount: 0,
+    itemCount: 0,
+    sidebarWords: 0,
+    mainWords: 0,
+  };
+
+  for (const page of pages) {
+    const parsed = collectWordsFromPage(page, imgW, imgH);
+    totalWords += parsed.length;
+    appendGroupedOcrFromParsedWords(parsed, imageDims, items, stats);
+  }
+
+  sortAndLogOcrGroupedItems(items, stats, totalWords);
+  return items;
+}
+
+/**
+ * textAnnotations / textDetection → same grouping as document OCR (parsed word list).
+ * @param {Record<string, unknown>} result
+ * @param {{ width: number; height: number }} imageDims
+ */
+function buildLineGroupsFromTextAnnotationsPipeline(result, imageDims) {
+  const parsed = parsedWordsFromTextAnnotations(result);
+  if (parsed.length === 0) {
+    return buildLineGroupsFromTextAnnotations(result);
+  }
+
+  /** @type {Array<{ description: string; boundingPoly: { vertices: { x: number; y: number }[] }; words: object[] }>} */
+  const items = [];
+  const stats = {
+    verticalCount: 0,
+    lineRunCount: 0,
+    blockCount: 0,
+    itemCount: 0,
+    sidebarWords: 0,
+    mainWords: 0,
+  };
+  appendGroupedOcrFromParsedWords(parsed, imageDims, items, stats);
+  sortAndLogOcrGroupedItems(items, stats, parsed.length);
   return items;
 }
 
@@ -587,23 +670,30 @@ function buildLineGroupsFromTextAnnotations(result) {
 }
 
 /**
- * Build overlay line items from a Vision AnnotateImageResponse (documentTextDetection).
+ * Build overlay line items from a Vision AnnotateImageResponse.
+ * Document layout uses fullTextAnnotation.pages; otherwise textAnnotations + same grouping pipeline.
  * @param {Record<string, unknown>} result
  * @param {{ width: number; height: number }} imageDims
  */
 function buildLineOverlayItems(result, imageDims) {
   const fullText = result.fullTextAnnotation;
-  if (fullText && typeof fullText === 'object') {
+  if (
+    fullText &&
+    typeof fullText === 'object' &&
+    Array.isArray(fullText.pages) &&
+    fullText.pages.length > 0
+  ) {
     return buildLineGroupsFromFullText(/** @type {Record<string, unknown>} */ (fullText), imageDims);
   }
-  return buildLineGroupsFromTextAnnotations(result);
+  return buildLineGroupsFromTextAnnotationsPipeline(result, imageDims);
 }
 
 /**
- * Image size for coordinate math (Vision page dims match the analyzed image).
+ * Image size for coordinate math (Vision page dims match the analyzed image when present).
  * @param {Record<string, unknown>} result
+ * @param {{ width?: number; height?: number }} [fallbackDims] screenshot / PNG size when pages missing (textDetection).
  */
-function inferImageDimsFromResult(result) {
+function inferImageDimsFromResult(result, fallbackDims) {
   const fta = result.fullTextAnnotation;
   const pages = fta && fta.pages;
   if (pages && pages.length > 0) {
@@ -611,11 +701,17 @@ function inferImageDimsFromResult(result) {
     const h = Number(pages[0].height);
     if (w > 0 && h > 0) return { width: w, height: h };
   }
+  if (fallbackDims && Number(fallbackDims.width) > 0 && Number(fallbackDims.height) > 0) {
+    return { width: Number(fallbackDims.width), height: Number(fallbackDims.height) };
+  }
   return { width: 1, height: 1 };
 }
 
-/** @param {Record<string, unknown>} result Vision AnnotateImageResponse-like object */
-function formatOcrTextReport(result) {
+/**
+ * @param {Record<string, unknown>} result Vision AnnotateImageResponse-like object
+ * @param {{ width?: number; height?: number }} [imageDims] PNG dimensions for grouping when using textDetection
+ */
+function formatOcrTextReport(result, imageDims) {
   const lines = [];
   const fullText = result.fullTextAnnotation;
 
@@ -633,7 +729,7 @@ function formatOcrTextReport(result) {
 
   lines.push('');
   lines.push('=== Line groups (overlay) ===');
-  const dims = inferImageDimsFromResult(result);
+  const dims = inferImageDimsFromResult(result, imageDims);
   const groups = buildLineOverlayItems(result, dims);
   if (groups.length === 0) {
     lines.push('(none)');
@@ -674,20 +770,36 @@ function jsonReplacer(_key, value) {
 }
 
 /**
- * Run Vision documentTextDetection on image bytes (ADC only). Avoids re-reading the PNG from disk.
+ * Run Vision OCR on image bytes (ADC only). Mode: OCR_MODE=document | text.
  * @param {Buffer} imageBytes
- * @returns {Promise<{ success: true, rawResponse: object } | { success: false, error: string, code?: number }>}
+ * @returns {Promise<{ success: true, rawResponse: object, ocrMode: string, ocrRpcMs: number } | { success: false, error: string, code?: number, ocrMode?: string, ocrRpcMs?: number }>}
  */
 async function runOcrOnImageBuffer(imageBytes) {
   if (!imageBytes || imageBytes.length === 0) {
     return { success: false, error: 'Empty image buffer' };
   }
 
+  const mode = getOcrMode();
   const t0 = performance.now();
+  console.log('[perf-detail] vision_ocr_mode', mode);
   console.log('[perf-detail] vision_request_png_bytes', imageBytes.length);
-  console.log('[perf-detail] vision_documentTextDetection_rpc_start');
 
   try {
+    if (mode === 'text') {
+      console.log('[perf-detail] vision_textDetection_rpc_start');
+      const [result] = await getClient().textDetection({
+        image: { content: imageBytes },
+      });
+
+      const rpcMs = performance.now() - t0;
+      const ta = result && result.textAnnotations;
+      console.log('[perf-detail] vision_textDetection_rpc_done_ms', rpcMs.toFixed(1));
+      console.log('[perf-detail] vision_result_textAnnotations_count', ta ? ta.length : 0);
+
+      return { success: true, rawResponse: result || {}, ocrMode: 'text', ocrRpcMs: rpcMs };
+    }
+
+    console.log('[perf-detail] vision_documentTextDetection_rpc_start');
     const [result] = await getClient().documentTextDetection({
       image: { content: imageBytes },
     });
@@ -697,14 +809,20 @@ async function runOcrOnImageBuffer(imageBytes) {
     console.log('[perf-detail] vision_documentTextDetection_rpc_done_ms', rpcMs.toFixed(1));
     console.log('[perf-detail] vision_result_pages', fta && fta.pages ? fta.pages.length : 0);
 
-    return { success: true, rawResponse: result || {} };
+    return { success: true, rawResponse: result || {}, ocrMode: 'document', ocrRpcMs: rpcMs };
   } catch (err) {
     const rpcMs = performance.now() - t0;
-    console.log('[perf-detail] vision_documentTextDetection_failed_after_ms', rpcMs.toFixed(1));
+    if (mode === 'text') {
+      console.log('[perf-detail] vision_textDetection_failed_after_ms', rpcMs.toFixed(1));
+    } else {
+      console.log('[perf-detail] vision_documentTextDetection_failed_after_ms', rpcMs.toFixed(1));
+    }
     return {
       success: false,
       error: err.message || String(err),
       code: err.code,
+      ocrMode: mode,
+      ocrRpcMs: rpcMs,
     };
   }
 }
@@ -741,4 +859,6 @@ module.exports = {
   formatOcrTextReport,
   stringifyRawResponse,
   buildLineOverlayItems,
+  getOcrMode,
+  inferImageDimsFromResult,
 };
