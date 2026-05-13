@@ -1,0 +1,177 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Screen Translator Overlay</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100vw;
+        height: 100vh;
+        overflow: hidden;
+        background: transparent;
+        font-family: "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
+        color: #fff;
+        user-select: none;
+        -webkit-user-select: none;
+        cursor: default;
+      }
+
+      #stage {
+        position: absolute;
+        inset: 0;
+      }
+
+      .ocr-item {
+        position: absolute;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        background: rgba(0, 0, 0, 0.72);
+        color: #fff;
+        border-radius: 6px;
+        padding: 2px 6px;
+        box-sizing: border-box;
+        line-height: 1.1;
+        overflow: hidden;
+        white-space: nowrap;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+        pointer-events: none;
+      }
+
+      #close-btn {
+        position: fixed;
+        top: 12px;
+        right: 12px;
+        width: 36px;
+        height: 36px;
+        border-radius: 50%;
+        background: rgba(0, 0, 0, 0.7);
+        color: #fff;
+        font-size: 20px;
+        line-height: 36px;
+        text-align: center;
+        cursor: pointer;
+        border: 1px solid rgba(255, 255, 255, 0.25);
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45);
+        z-index: 10;
+        font-weight: 600;
+      }
+
+      #close-btn:hover {
+        background: rgba(220, 53, 69, 0.9);
+      }
+
+      #empty {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background: rgba(0, 0, 0, 0.72);
+        color: #fff;
+        padding: 12px 20px;
+        border-radius: 8px;
+        font-size: 14px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="stage"></div>
+    <div id="close-btn" title="Close (Esc)">×</div>
+
+    <script>
+      const { ipcRenderer } = require('electron');
+
+      const stage = document.getElementById('stage');
+      const closeBtn = document.getElementById('close-btn');
+
+      function closeOverlay() {
+        ipcRenderer.send('overlay:close');
+      }
+
+      closeBtn.addEventListener('click', closeOverlay);
+      window.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+          closeOverlay();
+        }
+      });
+
+      function clampFontSize(boxHeight, text) {
+        // Fit roughly inside the box; account for padding (~4px).
+        let size = Math.max(10, Math.min(48, Math.floor(boxHeight * 0.75) - 2));
+        // Long text in a thin box: cap further.
+        if (text && text.length > 0) {
+          size = Math.min(size, 48);
+        }
+        return size;
+      }
+
+      function renderItems(items, imageWidth, imageHeight) {
+        stage.innerHTML = '';
+
+        if (!items || items.length === 0) {
+          const msg = document.createElement('div');
+          msg.id = 'empty';
+          msg.textContent = 'No OCR items to display.';
+          document.body.appendChild(msg);
+          return 0;
+        }
+
+        const overlayW = window.innerWidth;
+        const overlayH = window.innerHeight;
+        const scaleX = overlayW / Math.max(1, imageWidth);
+        const scaleY = overlayH / Math.max(1, imageHeight);
+
+        let placed = 0;
+        for (const item of items) {
+          const vertices = (item.boundingPoly && item.boundingPoly.vertices) || [];
+          if (vertices.length === 0) continue;
+
+          const xs = vertices.map((v) => v.x || 0);
+          const ys = vertices.map((v) => v.y || 0);
+          const minX = Math.min(...xs);
+          const minY = Math.min(...ys);
+          const maxX = Math.max(...xs);
+          const maxY = Math.max(...ys);
+
+          const left = minX * scaleX;
+          const top = minY * scaleY;
+          const width = Math.max(8, (maxX - minX) * scaleX);
+          const height = Math.max(8, (maxY - minY) * scaleY);
+
+          const el = document.createElement('div');
+          el.className = 'ocr-item';
+          el.style.left = left + 'px';
+          el.style.top = top + 'px';
+          el.style.width = width + 'px';
+          el.style.height = height + 'px';
+          el.style.fontSize = clampFontSize(height, item.description || '') + 'px';
+          el.textContent = item.description || '';
+          stage.appendChild(el);
+          placed++;
+        }
+
+        return placed;
+      }
+
+      (async () => {
+        try {
+          const payload = await ipcRenderer.invoke('overlay:get-data');
+          if (!payload) {
+            closeOverlay();
+            return;
+          }
+          const { items, imageWidth, imageHeight } = payload;
+          const count = renderItems(items, imageWidth, imageHeight);
+          ipcRenderer.send('overlay:ready', count);
+        } catch (err) {
+          ipcRenderer.send('overlay:ready', 0);
+          closeOverlay();
+        }
+      })();
+    </script>
+  </body>
+</html>

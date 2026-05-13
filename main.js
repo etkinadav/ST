@@ -8,6 +8,8 @@ const {
   desktopCapturer,
   shell,
   dialog,
+  BrowserWindow,
+  ipcMain,
 } = require('electron');
 const fs = require('fs');
 const path = require('path');
@@ -18,6 +20,10 @@ const SHORTCUT = 'CommandOrControl+Shift+Z';
 const CAPTURES_DIR = path.join(app.getPath('documents'), 'screen-translator-captures');
 
 let tray = null;
+/** @type {import('electron').BrowserWindow | null} */
+let overlayWin = null;
+/** @type {{ items: any[], imageWidth: number, imageHeight: number } | null} */
+let overlayData = null;
 
 function timestamp() {
   const d = new Date();
@@ -42,7 +48,7 @@ function ocrSidecarPaths(pngPath) {
   };
 }
 
-async function runOcrForScreenshot(pngPath) {
+async function runOcrForScreenshot(pngPath, imageDims) {
   console.log('OCR started', pngPath);
   const ocr = await runOcrOnImage(pngPath);
   if (!ocr.success) {
@@ -69,7 +75,84 @@ async function runOcrForScreenshot(pngPath) {
   }
 
   console.log('OCR finished', pngPath);
+
+  try {
+    const annotations = (ocr.rawResponse && ocr.rawResponse.textAnnotations) || [];
+    // textAnnotations[0] is the full block; the rest are individual items.
+    const items = annotations.slice(1);
+    showOverlay(items, imageDims);
+  } catch (err) {
+    console.error('Overlay error', err.message || err);
+  }
 }
+
+function closeOverlay() {
+  if (overlayWin && !overlayWin.isDestroyed()) {
+    overlayWin.close();
+  }
+}
+
+function showOverlay(items, imageDims) {
+  closeOverlay();
+
+  const primary = screen.getPrimaryDisplay();
+  const { x, y, width, height } = primary.bounds;
+
+  overlayData = {
+    items: items || [],
+    imageWidth: imageDims && imageDims.width ? imageDims.width : width,
+    imageHeight: imageDims && imageDims.height ? imageDims.height : height,
+  };
+
+  overlayWin = new BrowserWindow({
+    x,
+    y,
+    width,
+    height,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    hasShadow: false,
+    alwaysOnTop: true,
+    backgroundColor: '#00000000',
+    show: false,
+    webPreferences: {
+      nodeIntegration: true,
+      contextIsolation: false,
+      sandbox: false,
+    },
+  });
+
+  overlayWin.setAlwaysOnTop(true, 'screen-saver');
+  overlayWin.setMenuBarVisibility(false);
+
+  overlayWin.on('closed', () => {
+    overlayWin = null;
+    overlayData = null;
+    console.log('Overlay closed');
+  });
+
+  overlayWin.once('ready-to-show', () => {
+    overlayWin.show();
+    overlayWin.focus();
+    console.log('Overlay opened');
+  });
+
+  overlayWin.loadFile(path.join(__dirname, 'overlay.html')).catch((err) => {
+    console.error('Overlay error', 'failed to load overlay.html:', err.message || err);
+  });
+}
+
+ipcMain.handle('overlay:get-data', () => overlayData);
+ipcMain.on('overlay:ready', (_event, count) => {
+  console.log('Overlay items displayed', count);
+});
+ipcMain.on('overlay:close', () => closeOverlay());
 
 async function takeScreenshot() {
   try {
@@ -78,12 +161,14 @@ async function takeScreenshot() {
     const primary = screen.getPrimaryDisplay();
     const { width, height } = primary.size;
     const scale = primary.scaleFactor || 1;
+    const imageWidth = Math.round(width * scale);
+    const imageHeight = Math.round(height * scale);
 
     const sources = await desktopCapturer.getSources({
       types: ['screen'],
       thumbnailSize: {
-        width: Math.round(width * scale),
-        height: Math.round(height * scale),
+        width: imageWidth,
+        height: imageHeight,
       },
     });
 
@@ -105,7 +190,7 @@ async function takeScreenshot() {
 
     console.log('Screenshot saved', filepath);
 
-    await runOcrForScreenshot(filepath);
+    await runOcrForScreenshot(filepath, { width: imageWidth, height: imageHeight });
 
     return filepath;
   } catch (err) {
