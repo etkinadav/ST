@@ -488,15 +488,15 @@ function collectWordsFromPage(page, imgW, imgH) {
 }
 
 /**
- * OCR_MODE=document → documentTextDetection.
- * OCR_MODE=text → textDetection (default for speed comparison vs document).
+ * OCR_MODE=document → documentTextDetection (default — same RPC speed as text but better grouping hierarchy).
+ * OCR_MODE=text → textDetection (no measured speed advantage; left for experimentation).
  */
 function getOcrMode() {
-  const m = String(process.env.OCR_MODE || 'text')
+  const m = String(process.env.OCR_MODE || 'document')
     .trim()
     .toLowerCase();
-  if (m === 'document') return 'document';
-  return 'text';
+  if (m === 'text') return 'text';
+  return 'document';
 }
 
 /**

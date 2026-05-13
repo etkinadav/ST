@@ -311,8 +311,11 @@ async function takeScreenshot() {
 
     perfLap(perf, 'screenshot_capture');
 
-    const ocrMaxEdge = Number(process.env.OCR_MAX_EDGE) || 1280;
-    const ocrJpegQuality = Number(process.env.OCR_JPEG_QUALITY) || 82;
+    // 960px max-edge = ~50% fewer pixels than 1280, measurably faster Vision RPC.
+    // Override: OCR_MAX_EDGE=1280 for better quality, =800 for max speed.
+    const ocrMaxEdge = Number(process.env.OCR_MAX_EDGE) || 960;
+    // Lower quality = smaller payload with negligible OCR quality loss for UI text.
+    const ocrJpegQuality = Number(process.env.OCR_JPEG_QUALITY) || 72;
     const ocr = downscaleToJpegForOcr(pngBuffer, actualW, actualH, ocrMaxEdge, ocrJpegQuality);
     const imageDims = { width: ocr.width, height: ocr.height };
     perfDetail('ocr_payload_dimensions', `${ocr.width}x${ocr.height} from ${actualW}x${actualH}`);
