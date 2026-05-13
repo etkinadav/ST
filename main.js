@@ -12,6 +12,7 @@ const {
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
+const { runOcrOnImage, formatOcrTextReport, stringifyRawResponse } = require('./googleVision.js');
 
 const SHORTCUT = 'CommandOrControl+Shift+Z';
 const CAPTURES_DIR = path.join(app.getPath('documents'), 'screen-translator-captures');
@@ -29,6 +30,45 @@ function timestamp() {
 
 function ensureCapturesDir() {
   fs.mkdirSync(CAPTURES_DIR, { recursive: true });
+}
+
+/** @param {string} pngPath e.g. .../screenshot-2026-05-12-10-00-00.png */
+function ocrSidecarPaths(pngPath) {
+  const base = path.basename(pngPath, '.png');
+  const dir = path.dirname(pngPath);
+  return {
+    jsonPath: path.join(dir, `${base}.ocr.json`),
+    txtPath: path.join(dir, `${base}.ocr.txt`),
+  };
+}
+
+async function runOcrForScreenshot(pngPath) {
+  console.log('OCR started', pngPath);
+  const ocr = await runOcrOnImage(pngPath);
+  if (!ocr.success) {
+    console.error('OCR error', ocr.error, ocr.code != null ? `(code ${ocr.code})` : '');
+    return;
+  }
+
+  const { jsonPath, txtPath } = ocrSidecarPaths(pngPath);
+
+  try {
+    fs.writeFileSync(jsonPath, stringifyRawResponse(ocr.rawResponse), 'utf8');
+    console.log('OCR JSON saved', jsonPath);
+  } catch (err) {
+    console.error('OCR error', 'failed to write JSON:', err.message || err);
+    return;
+  }
+
+  try {
+    fs.writeFileSync(txtPath, formatOcrTextReport(ocr.rawResponse), 'utf8');
+    console.log('OCR TXT saved', txtPath);
+  } catch (err) {
+    console.error('OCR error', 'failed to write TXT:', err.message || err);
+    return;
+  }
+
+  console.log('OCR finished', pngPath);
 }
 
 async function takeScreenshot() {
@@ -63,7 +103,10 @@ async function takeScreenshot() {
     const filepath = path.join(CAPTURES_DIR, filename);
     fs.writeFileSync(filepath, pngBuffer);
 
-    console.log(`[ok] Screenshot saved: ${filepath}`);
+    console.log('Screenshot saved', filepath);
+
+    await runOcrForScreenshot(filepath);
+
     return filepath;
   } catch (err) {
     console.error('[error] Screenshot failed:', err);
