@@ -348,6 +348,42 @@ function jsonReplacer(_key, value) {
 }
 
 /**
+ * Run Vision documentTextDetection on image bytes (ADC only). Avoids re-reading the PNG from disk.
+ * @param {Buffer} imageBytes
+ * @returns {Promise<{ success: true, rawResponse: object } | { success: false, error: string, code?: number }>}
+ */
+async function runOcrOnImageBuffer(imageBytes) {
+  if (!imageBytes || imageBytes.length === 0) {
+    return { success: false, error: 'Empty image buffer' };
+  }
+
+  const t0 = performance.now();
+  console.log('[perf-detail] vision_request_png_bytes', imageBytes.length);
+  console.log('[perf-detail] vision_documentTextDetection_rpc_start');
+
+  try {
+    const [result] = await getClient().documentTextDetection({
+      image: { content: imageBytes },
+    });
+
+    const rpcMs = performance.now() - t0;
+    const fta = result && result.fullTextAnnotation;
+    console.log('[perf-detail] vision_documentTextDetection_rpc_done_ms', rpcMs.toFixed(1));
+    console.log('[perf-detail] vision_result_pages', fta && fta.pages ? fta.pages.length : 0);
+
+    return { success: true, rawResponse: result || {} };
+  } catch (err) {
+    const rpcMs = performance.now() - t0;
+    console.log('[perf-detail] vision_documentTextDetection_failed_after_ms', rpcMs.toFixed(1));
+    return {
+      success: false,
+      error: err.message || String(err),
+      code: err.code,
+    };
+  }
+}
+
+/**
  * Run Vision documentTextDetection on a local image file (ADC only).
  * @param {string} imagePath Absolute or relative path to PNG/JPEG etc.
  * @returns {Promise<{ success: true, rawResponse: object } | { success: false, error: string, code?: number }>}
@@ -359,11 +395,7 @@ async function runOcrOnImage(imagePath) {
 
   try {
     const imageBytes = fs.readFileSync(imagePath);
-    const [result] = await getClient().documentTextDetection({
-      image: { content: imageBytes },
-    });
-
-    return { success: true, rawResponse: result || {} };
+    return runOcrOnImageBuffer(imageBytes);
   } catch (err) {
     return {
       success: false,
@@ -379,6 +411,7 @@ function stringifyRawResponse(rawResponse) {
 
 module.exports = {
   runOcrOnImage,
+  runOcrOnImageBuffer,
   formatOcrTextReport,
   stringifyRawResponse,
   buildLineOverlayItems,

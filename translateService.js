@@ -17,9 +17,6 @@ const { GoogleAuth } = require('google-auth-library');
 /** Target language for Hebrew snippets (BCP-47). */
 const DEFAULT_TARGET_LANGUAGE = 'en';
 
-/** Max strings per translateText request (stay under service limits). */
-const CHUNK_SIZE = 95;
-
 let client;
 
 function getTranslateClient() {
@@ -93,6 +90,7 @@ async function translateTextChunk(contents, targetLanguageCode, translateClient,
  */
 async function translateOcrLineItems(items, options = {}) {
   const targetLanguageCode = options.targetLanguageCode || DEFAULT_TARGET_LANGUAGE;
+  const tFilter0 = performance.now();
 
   console.log('Translation OCR groups count (input)', items.length);
 
@@ -129,8 +127,15 @@ async function translateOcrLineItems(items, options = {}) {
 
   const stringsToTranslate = candidates.map((c) => c.hebrewText);
 
+  console.log('[perf-detail] translate_filter_hebrew_candidates_ms', (performance.now() - tFilter0).toFixed(1));
+  console.log('Translation translateText single request, string count:', stringsToTranslate.length);
+
   try {
+    const tResolve = performance.now();
     const projectId = await resolveProjectId();
+    console.log('[perf-detail] translate_resolve_project_id_ms', (performance.now() - tResolve).toFixed(1));
+    console.log('[perf-detail] translate_project_id', projectId || '(null)');
+
     if (!projectId) {
       throw new Error(
         'Could not resolve GCP project ID. Set GOOGLE_CLOUD_PROJECT or run gcloud config set project.',
@@ -139,13 +144,19 @@ async function translateOcrLineItems(items, options = {}) {
     const parent = `projects/${projectId}/locations/global`;
     const translateClient = getTranslateClient();
 
-    /** @type {string[]} */
-    const apiOut = [];
-    for (let i = 0; i < stringsToTranslate.length; i += CHUNK_SIZE) {
-      const chunk = stringsToTranslate.slice(i, i + CHUNK_SIZE);
-      const part = await translateTextChunk(chunk, targetLanguageCode, translateClient, parent);
-      apiOut.push(...part);
-    }
+    const totalChars = stringsToTranslate.reduce((sum, s) => sum + s.length, 0);
+    const maxLen = stringsToTranslate.reduce((m, s) => Math.max(m, s.length), 0);
+    console.log('[perf-detail] translate_payload_chars_total', totalChars);
+    console.log('[perf-detail] translate_payload_max_string_len', maxLen);
+
+    const tRpc = performance.now();
+    const apiOut = await translateTextChunk(
+      stringsToTranslate,
+      targetLanguageCode,
+      translateClient,
+      parent,
+    );
+    console.log('[perf-detail] translate_translateText_rpc_ms', (performance.now() - tRpc).toFixed(1));
 
     const out = candidates.map((c, j) => {
       const translated = apiOut[j] != null ? apiOut[j] : c.hebrewText;

@@ -22,6 +22,21 @@
         inset: 0;
       }
 
+      #loading {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background: rgba(0, 0, 0, 0.78);
+        color: #fff;
+        padding: 20px 36px;
+        border-radius: 10px;
+        font-size: 20px;
+        font-weight: 500;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+        z-index: 5;
+      }
+
       .ocr-item {
         position: absolute;
         display: flex;
@@ -80,12 +95,14 @@
   </head>
   <body>
     <div id="stage"></div>
+    <div id="loading" style="display: none">Translating...</div>
     <div id="close-btn" title="Close (Esc)">×</div>
 
     <script>
       const { ipcRenderer } = require('electron');
 
       const stage = document.getElementById('stage');
+      const loadingEl = document.getElementById('loading');
       const closeBtn = document.getElementById('close-btn');
 
       function closeOverlay() {
@@ -99,7 +116,6 @@
         }
       });
 
-      /** Matches .ocr-item padding: 2px 6px (border-box). */
       const PAD_X = 12;
       const PAD_Y = 4;
       const MIN_FONT_PX = 8;
@@ -111,10 +127,6 @@
         console.error('Overlay: canvas 2d context unavailable for text measurement');
       }
 
-      /**
-       * Single-line font fit using canvas measureText (width scales ~linearly with font size).
-       * initialFontSize = boxHeight * 0.85; if measuredWidth > innerWidth, scale down; floor at 8px.
-       */
       function fitFontSizeToSingleLine(text, boxWidth, boxHeight) {
         const innerW = Math.max(1, boxWidth - PAD_X);
         const innerH = Math.max(1, boxHeight - PAD_Y);
@@ -144,6 +156,10 @@
         return fontSize;
       }
 
+      function setLoadingVisible(on) {
+        loadingEl.style.display = on ? 'block' : 'none';
+      }
+
       function renderItems(payload) {
         stage.innerHTML = '';
 
@@ -157,7 +173,7 @@
         if (!items || items.length === 0) {
           const msg = document.createElement('div');
           msg.id = 'empty';
-          msg.textContent = 'No OCR items to display.';
+          msg.textContent = payload.errorMessage || 'No OCR items to display.';
           document.body.appendChild(msg);
           return 0;
         }
@@ -199,20 +215,38 @@
         return placed;
       }
 
-      (async () => {
-        try {
-          const payload = await ipcRenderer.invoke('overlay:get-data');
-          if (!payload) {
-            closeOverlay();
-            return;
-          }
-          const count = renderItems(payload);
-          ipcRenderer.send('overlay:ready', count);
-        } catch (err) {
-          ipcRenderer.send('overlay:ready', 0);
+      async function paintFromPayload() {
+        const tRender0 = performance.now();
+        const payload = await ipcRenderer.invoke('overlay:get-data');
+        if (!payload) {
           closeOverlay();
+          return;
         }
-      })();
+
+        if (payload.loading) {
+          setLoadingVisible(true);
+          ipcRenderer.send('overlay:ready', {
+            phase: 'loading',
+            count: 0,
+            renderMs: performance.now() - tRender0,
+          });
+          return;
+        }
+
+        setLoadingVisible(false);
+        const count = renderItems(payload);
+        ipcRenderer.send('overlay:ready', {
+          phase: 'content',
+          count,
+          renderMs: performance.now() - tRender0,
+        });
+      }
+
+      ipcRenderer.on('overlay:update', () => {
+        void paintFromPayload();
+      });
+
+      void paintFromPayload();
     </script>
   </body>
 </html>
