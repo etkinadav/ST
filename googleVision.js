@@ -115,6 +115,215 @@ function lineMetricsFromWords(lineWords) {
   };
 }
 
+/** Left fraction of image width = sidebar; never merge with main region. */
+const REGION_SIDEBAR_X_FRAC = 0.35;
+
+/**
+ * @param {{ centerX: number }} w
+ * @param {number} imgW
+ * @returns {'sidebar' | 'main'}
+ */
+function wordScreenRegion(w, imgW) {
+  const boundary = imgW * REGION_SIDEBAR_X_FRAC;
+  return w.centerX < boundary ? 'sidebar' : 'main';
+}
+
+/**
+ * @param {Array<{ text: string; rect: object; word: object }>} parsed
+ * @param {number} imgW
+ */
+function splitWordsByScreenRegion(parsed, imgW) {
+  const enriched = enrichWordsForClustering(parsed);
+  /** @type {typeof enriched[]} */
+  const sidebar = [];
+  /** @type {typeof enriched[]} */
+  const main = [];
+  for (const w of enriched) {
+    if (wordScreenRegion(w, imgW) === 'sidebar') {
+      sidebar.push(w);
+    } else {
+      main.push(w);
+    }
+  }
+  return { sidebar, main };
+}
+
+/**
+ * Horizontal overlap as a fraction of the narrower span (0..1).
+ * @param {{ minX: number; maxX: number }} a
+ * @param {{ minX: number; maxX: number }} b
+ */
+function xOverlapRatio(a, b) {
+  const wA = Math.max(0, a.maxX - a.minX);
+  const wB = Math.max(0, b.maxX - b.minX);
+  const overlap = Math.max(0, Math.min(a.maxX, b.maxX) - Math.max(a.minX, b.minX));
+  const denom = Math.min(wA, wB);
+  if (denom <= 0) return overlap > 0 ? 1 : 0;
+  return overlap / denom;
+}
+
+/**
+ * @param {Array<{ rect: object; text: string; word: object; centerX: number; centerY: number; height: number }>} segWords
+ * @param {'sidebar' | 'main'} region
+ */
+function lineRunFromSegment(segWords, region) {
+  if (!segWords || segWords.length === 0) return null;
+  const rtl = lineLooksMostlyHebrew(segWords);
+  const ordered = sortWordsInLineByReadingOrder(segWords, rtl);
+  const rect = unionRects(ordered.map((s) => s.rect));
+  if (!rect) return null;
+  const description = ordered
+    .map((s) => s.text)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!description) return null;
+  return {
+    words: ordered,
+    rect,
+    region,
+    description,
+    height: rectHeight(rect),
+  };
+}
+
+/**
+ * Merge visual line runs into message-style blocks within one screen region.
+ * @param {NonNullable<ReturnType<typeof lineRunFromSegment>>[]} runs
+ * @returns {NonNullable<ReturnType<typeof lineRunFromSegment>>[][]}
+ */
+function mergeLineRunsIntoMessageBlocks(runs) {
+  const lines = [...runs].sort((a, b) => a.rect.minY - b.rect.minY || a.rect.minX - b.rect.minX);
+  /** @type {typeof lines[][]} */
+  const blocks = [];
+
+  for (const line of lines) {
+    if (blocks.length === 0) {
+      blocks.push([line]);
+      continue;
+    }
+    const cur = blocks[blocks.length - 1];
+    const last = cur[cur.length - 1];
+    const unionBlock = unionRects(cur.map((c) => c.rect));
+    if (!unionBlock) {
+      blocks.push([line]);
+      continue;
+    }
+
+    const verticalGap = line.rect.minY - last.rect.maxY;
+    const avgH = (last.height + line.height) / 2;
+    if (verticalGap >= avgH * 1.2) {
+      blocks.push([line]);
+      continue;
+    }
+
+    const xOv = xOverlapRatio(line.rect, unionBlock);
+    if (xOv <= 0.6) {
+      blocks.push([line]);
+      continue;
+    }
+
+    const anchorMinX = cur[0].rect.minX;
+    const alignTol = Math.max(12, avgH * 0.45);
+    if (Math.abs(line.rect.minX - anchorMinX) > alignTol) {
+      blocks.push([line]);
+      continue;
+    }
+
+    cur.push(line);
+  }
+
+  return blocks;
+}
+
+/**
+ * @param {NonNullable<ReturnType<typeof lineRunFromSegment>>[][]} blockLines
+ */
+function messageBlockToOverlayItem(blockLines) {
+  const texts = [];
+  /** @type {object[]} */
+  const visionWords = [];
+  for (const ln of blockLines) {
+    texts.push(ln.description);
+    for (const w of ln.words) {
+      visionWords.push(w.word);
+    }
+  }
+  const union = unionRects(blockLines.map((l) => l.rect));
+  if (!union) return null;
+  const description = texts.join(' ').replace(/\s+/g, ' ').trim();
+  if (!description) return null;
+  return {
+    description,
+    boundingPoly: { vertices: rectToVertices(union) },
+    words: visionWords,
+  };
+}
+
+/** Any Unicode letter (incl. Hebrew). */
+const HAS_LETTER_RE = /[\p{L}\p{M}]/u;
+
+/**
+ * Timestamps, tiny non-text, icon noise, short sidebar nav labels.
+ * @param {string} description
+ * @param {'sidebar' | 'main'} region
+ */
+function isLikelyUiNoise(description, region) {
+  const t = String(description || '').trim();
+  if (t.length < 2) return true;
+
+  if (/^\d{1,2}:\d{2}(:\d{2})?$/.test(t)) return true;
+  if (/^\d{1,2}\s*[.:]\s*\d{2}\s*([AP]M)?$/i.test(t)) return true;
+  if (/^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(t)) return true;
+
+  if (!HAS_LETTER_RE.test(t) && t.length < 4) return true;
+
+  if (t.length === 1 && !HAS_LETTER_RE.test(t)) return true;
+
+  if (region === 'sidebar' && t.length <= 14) {
+    if (/^(chats|calls|status|settings|search|archive|starred|messages?|updates?)$/i.test(t)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Per region: lines + horizontal splits + message blocks + noise filter.
+ * @param {ReturnType<typeof enrichWordsForClustering>} regionWords
+ * @param {'sidebar' | 'main'} region
+ * @param {{ verticalCount: number; lineRunCount: number; blockCount: number; itemCount: number }} stats
+ */
+function buildOverlayItemsForRegion(regionWords, region, stats) {
+  if (regionWords.length === 0) return [];
+
+  const { verticalLines, horizontalSegments } = clusterWordsIntoVisualLines(regionWords);
+  stats.verticalCount += verticalLines.length;
+
+  /** @type {NonNullable<ReturnType<typeof lineRunFromSegment>>[]} */
+  const lineRuns = [];
+  for (const seg of horizontalSegments) {
+    const run = lineRunFromSegment(seg, region);
+    if (run) lineRuns.push(run);
+  }
+  stats.lineRunCount += lineRuns.length;
+
+  const blocks = mergeLineRunsIntoMessageBlocks(lineRuns);
+  stats.blockCount += blocks.length;
+
+  /** @type {Array<{ description: string; boundingPoly: { vertices: { x: number; y: number }[] }; words: object[] }>} */
+  const out = [];
+  for (const block of blocks) {
+    const item = messageBlockToOverlayItem(block);
+    if (!item) continue;
+    if (isLikelyUiNoise(item.description, region)) continue;
+    out.push(item);
+  }
+  stats.itemCount += out.length;
+  return out;
+}
+
 /**
  * Enrich Vision words with geometry used for clustering.
  * @param {Array<{ rect: object; text: string; word: object }>} parsed
@@ -279,7 +488,7 @@ function collectWordsFromPage(page, imgW, imgH) {
 }
 
 /**
- * Flatten all words, cluster by vertical centerY, split runs by horizontal gaps, one boundingPoly per segment.
+ * Regions (sidebar vs main) → visual lines → horizontal runs → message blocks → noise filter.
  * @param {Record<string, unknown>} fullText
  * @param {{ width: number; height: number }} imageDims
  * @returns {Array<{ description: string; boundingPoly: { vertices: { x: number; y: number }[] }; words: object[] }>}
@@ -292,31 +501,24 @@ function buildLineGroupsFromFullText(fullText, imageDims) {
   /** @type {Array<{ description: string; boundingPoly: { vertices: { x: number; y: number }[] }; words: object[] }>} */
   const items = [];
   let totalWords = 0;
-  let verticalLineTotal = 0;
+  const stats = {
+    verticalCount: 0,
+    lineRunCount: 0,
+    blockCount: 0,
+    itemCount: 0,
+    sidebarWords: 0,
+    mainWords: 0,
+  };
 
   for (const page of pages) {
     const parsed = collectWordsFromPage(page, imgW, imgH);
     totalWords += parsed.length;
-    const { verticalLines, horizontalSegments } = clusterWordsIntoVisualLines(parsed);
-    verticalLineTotal += verticalLines.length;
+    const { sidebar, main } = splitWordsByScreenRegion(parsed, imgW);
+    stats.sidebarWords += sidebar.length;
+    stats.mainWords += main.length;
 
-    for (const seg of horizontalSegments) {
-      const rtl = lineLooksMostlyHebrew(seg);
-      const ordered = sortWordsInLineByReadingOrder(seg, rtl);
-      const union = unionRects(ordered.map((s) => s.rect));
-      if (!union) continue;
-      const description = ordered
-        .map((s) => s.text)
-        .join(' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-      if (!description) continue;
-      items.push({
-        description,
-        boundingPoly: { vertices: rectToVertices(union) },
-        words: ordered.map((s) => s.word),
-      });
-    }
+    items.push(...buildOverlayItemsForRegion(sidebar, 'sidebar', stats));
+    items.push(...buildOverlayItemsForRegion(main, 'main', stats));
   }
 
   items.sort((a, b) => {
@@ -328,8 +530,12 @@ function buildLineGroupsFromFullText(fullText, imageDims) {
   });
 
   console.log('[ocr-group] ocr_raw_word_count', totalWords);
-  console.log('[ocr-group] line_groups_before_horizontal_gap_filter', verticalLineTotal);
-  console.log('[ocr-group] line_groups_after_horizontal_gap_filter', items.length);
+  console.log('[ocr-group] region_sidebar_word_count', stats.sidebarWords);
+  console.log('[ocr-group] region_main_word_count', stats.mainWords);
+  console.log('[ocr-group] line_groups_before_horizontal_gap_filter', stats.verticalCount);
+  console.log('[ocr-group] line_groups_after_horizontal_gap_filter', stats.lineRunCount);
+  console.log('[ocr-group] message_block_count_before_noise_filter', stats.blockCount);
+  console.log('[ocr-group] overlay_item_count_after_noise_filter', stats.itemCount);
   const sample = items.slice(0, 10).map((it) => {
     const v = it.boundingPoly && it.boundingPoly.vertices;
     let boundingBox = null;
