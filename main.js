@@ -15,7 +15,7 @@ const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 const { runOcrOnImageBuffer, formatOcrTextReport, stringifyRawResponse, buildLineOverlayItems } = require('./googleVision.js');
-const { translateOcrLineItems, DEFAULT_TARGET_LANGUAGE } = require('./translateService.js');
+const { translateOcrLineItems, DEFAULT_TARGET_LANGUAGE, initTranslateService } = require('./translateService.js');
 
 const SHORTCUT = 'CommandOrControl+Shift+Z';
 const CAPTURES_DIR = path.join(app.getPath('documents'), 'screen-translator-captures');
@@ -523,7 +523,7 @@ if (process.platform === 'win32') {
   app.setAppUserModelId('com.screen-translator.mvp');
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   console.log('[start] Screen Translator started');
   console.log(`[info] Captures folder: ${CAPTURES_DIR}`);
 
@@ -531,6 +531,13 @@ app.whenReady().then(() => {
     ensureCapturesDir();
   } catch (err) {
     console.error('[error] Failed to create captures folder:', err);
+  }
+
+  try {
+    await initTranslateService();
+  } catch (err) {
+    console.error('[error] Translate service bootstrap failed:', err.message || err);
+    console.error('[info] Set GOOGLE_CLOUD_PROJECT or run gcloud config set project; will retry on first translation.');
   }
 
   const registered = globalShortcut.register(SHORTCUT, () => {

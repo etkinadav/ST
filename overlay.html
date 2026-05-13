@@ -207,6 +207,7 @@
           }
           const fontPx = fitFontSizeToSingleLine(text, width, height);
           el.style.fontSize = fontPx + 'px';
+          el.style.direction = item.sourceWasRtl ? 'rtl' : 'ltr';
           el.textContent = text;
           stage.appendChild(el);
           placed++;

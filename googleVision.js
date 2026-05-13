@@ -76,82 +76,158 @@ function rectHeight(r) {
   return Math.max(0, r.maxY - r.minY);
 }
 
-function rectCenterY(r) {
-  return (r.minY + r.maxY) / 2;
-}
+/** Hebrew block + Hebrew presentation forms (reading order within a line). */
+const HEBREW_RE = /[\u0590-\u05FF\uFB1D-\uFB4F]/;
 
-/** Vertical overlap / min(heights) in [0, 1] */
-function verticalOverlapRatio(a, b) {
-  const h1 = rectHeight(a);
-  const h2 = rectHeight(b);
-  const minH = Math.min(h1, h2);
-  if (minH <= 0) return 0;
-  const inter = Math.min(a.maxY, b.maxY) - Math.max(a.minY, b.minY);
-  return Math.max(0, inter) / minH;
-}
-
-function unionWordBounds(words) {
-  return unionRects(words.map((w) => w.rect));
+/**
+ * @param {Array<{ text: string; rect: object; word: object }>} wordEntries
+ */
+function lineLooksMostlyHebrew(wordEntries) {
+  let heb = 0;
+  let lat = 0;
+  for (const w of wordEntries) {
+    const t = w.text || '';
+    for (let i = 0; i < t.length; i++) {
+      const c = t.charAt(i);
+      if (HEBREW_RE.test(c)) heb++;
+      else if (/[A-Za-z]/.test(c)) lat++;
+    }
+  }
+  return heb > 0 && heb >= lat;
 }
 
 /**
- * Group words that sit on the same horizontal line (within a paragraph).
- * @param {Array<{ rect: object; text: string; word: object }>} words
+ * @param {Array<{ rect: object; text: string; word: object; centerX: number; centerY: number; height: number }>} lineWords
  */
-function clusterWordsIntoLines(words) {
+function lineMetricsFromWords(lineWords) {
+  if (lineWords.length === 0) {
+    return { centerY: 0, avgHeight: 10 };
+  }
+  let sumCy = 0;
+  let sumH = 0;
+  for (const w of lineWords) {
+    sumCy += w.centerY;
+    sumH += w.height;
+  }
+  return {
+    centerY: sumCy / lineWords.length,
+    avgHeight: sumH / lineWords.length,
+  };
+}
+
+/**
+ * Enrich Vision words with geometry used for clustering.
+ * @param {Array<{ rect: object; text: string; word: object }>} parsed
+ */
+function enrichWordsForClustering(parsed) {
+  return parsed.map((w) => {
+    const height = rectHeight(w.rect);
+    return {
+      ...w,
+      centerX: (w.rect.minX + w.rect.maxX) / 2,
+      centerY: (w.rect.minY + w.rect.maxY) / 2,
+      height,
+    };
+  });
+}
+
+/**
+ * Group Vision words by vertical center proximity only (used before horizontal gap splitting).
+ * @param {Array<{ rect: object; text: string; word: object; centerX: number; centerY: number; height: number }>} words
+ * @returns {Array<{ words: typeof words }>}
+ */
+function clusterWordsByVerticalProximity(words) {
   if (words.length === 0) return [];
-  const sorted = [...words].sort((a, b) => a.rect.minY - b.rect.minY || a.rect.minX - b.rect.minX);
-  /** @type {{ words: typeof words }[]} */
+
+  const sorted = [...words].sort((a, b) => a.centerY - b.centerY || a.centerX - b.centerX);
+
+  /** @type {Array<{ words: typeof sorted }>} */
   const lines = [];
 
   for (const w of sorted) {
     let bestIdx = -1;
-    let bestScore = -1;
+    let bestDist = Infinity;
     for (let i = 0; i < lines.length; i++) {
-      const lineRect = unionWordBounds(lines[i].words);
-      if (!lineRect) continue;
-      const ov = verticalOverlapRatio(w.rect, lineRect);
-      const h = Math.max(rectHeight(w.rect), rectHeight(lineRect), 1);
-      const cyDist = Math.abs(rectCenterY(w.rect) - rectCenterY(lineRect)) / h;
-      const score = ov > 0.2 ? ov : cyDist < 0.5 ? 0.5 - cyDist : 0;
-      if (score > bestScore) {
-        bestScore = score;
+      const existing = lines[i].words;
+      const { centerY: lineCy, avgHeight } = lineMetricsFromWords(existing);
+      const thr = Math.max(avgHeight * 0.6, 8);
+      const d = Math.abs(w.centerY - lineCy);
+      if (d < thr && d < bestDist) {
+        bestDist = d;
         bestIdx = i;
       }
     }
-    if (bestIdx >= 0 && bestScore > 0.15) {
+    if (bestIdx >= 0) {
       lines[bestIdx].words.push(w);
     } else {
       lines.push({ words: [w] });
     }
   }
+
   return lines;
 }
 
 /**
- * Split words on one visual line into groups when there is a large horizontal gap (separate UI columns).
- * @param {Array<{ rect: object; text: string; word: object }>} words sorted by x
- * @param {number} imgW
+ * Split one vertical line into horizontal runs when gaps between boxes are too large
+ * (e.g. WhatsApp sidebar vs chat on the same scanline).
+ * Words are ordered by minX; gap = next.minX - prev.maxX.
+ * @param {Array<{ rect: object; text: string; word: object; centerX: number; centerY: number; height: number }>} lineWords
+ * @returns {Array<typeof lineWords[]>}
  */
-function splitWordsByHorizontalGap(words, imgW) {
-  if (words.length === 0) return [];
-  const gapThreshold = Math.min(180, Math.max(32, (imgW || 1920) * 0.045));
-  /** @type {typeof words[]} */
-  const groups = [];
-  let cur = [words[0]];
-  for (let i = 1; i < words.length; i++) {
+function splitVerticalLineByHorizontalGaps(lineWords) {
+  if (lineWords.length === 0) return [];
+  if (lineWords.length === 1) return [lineWords];
+
+  const { avgHeight } = lineMetricsFromWords(lineWords);
+  const maxJoinGap = Math.max(avgHeight * 4, 40);
+
+  const byX = [...lineWords].sort((a, b) => a.rect.minX - b.rect.minX || a.centerY - b.centerY);
+
+  /** @type {typeof lineWords[][]} */
+  const runs = [];
+  let cur = [byX[0]];
+  for (let i = 1; i < byX.length; i++) {
     const prev = cur[cur.length - 1];
-    const w = words[i];
-    const gap = w.rect.minX - prev.rect.maxX;
-    if (gap > gapThreshold) {
-      groups.push(cur);
+    const w = byX[i];
+    const horizontalGap = w.rect.minX - prev.rect.maxX;
+    if (horizontalGap > 120 || horizontalGap >= maxJoinGap) {
+      runs.push(cur);
       cur = [w];
     } else {
       cur.push(w);
     }
   }
-  groups.push(cur);
-  return groups;
+  runs.push(cur);
+  return runs;
+}
+
+/**
+ * Vertical line clustering, then horizontal gap splits within each line.
+ * @param {Array<{ rect: object; text: string; word: object }>} parsed
+ * @returns {{ verticalLines: Array<{ words: object[] }>; horizontalSegments: object[][] }}
+ */
+function clusterWordsIntoVisualLines(parsed) {
+  const enriched = enrichWordsForClustering(parsed);
+  const verticalLines = clusterWordsByVerticalProximity(enriched);
+  /** @type {typeof enriched[][]} */
+  const horizontalSegments = [];
+  for (const line of verticalLines) {
+    for (const run of splitVerticalLineByHorizontalGaps(line.words)) {
+      horizontalSegments.push(run);
+    }
+  }
+  return { verticalLines, horizontalSegments };
+}
+
+/**
+ * Reading order: LTR by increasing centerX; RTL (Hebrew-dominant) by decreasing centerX (no string reversal).
+ * @param {Array<{ centerX: number }>} lineWords
+ * @param {boolean} rtl
+ */
+function sortWordsInLineByReadingOrder(lineWords, rtl) {
+  const sorted = [...lineWords];
+  sorted.sort((a, b) => (rtl ? b.centerX - a.centerX : a.centerX - b.centerX));
+  return sorted;
 }
 
 function rectToVertices(r) {
@@ -179,7 +255,31 @@ function wordFromSymbols(word, imgW, imgH) {
 }
 
 /**
- * Walk pages → blocks → paragraphs → words; build line-level overlay items.
+ * Collect every word on one Vision page (flatten blocks/paragraphs).
+ * @param {Record<string, unknown>} page
+ * @param {number} imgW
+ * @param {number} imgH
+ * @returns {Array<{ text: string; rect: object; word: object }>}
+ */
+function collectWordsFromPage(page, imgW, imgH) {
+  const blocks = page.blocks || [];
+  /** @type {Array<{ text: string; rect: object; word: object }>} */
+  const parsed = [];
+  for (const block of blocks) {
+    const paragraphs = block.paragraphs || [];
+    for (const paragraph of paragraphs) {
+      const rawWords = paragraph.words || [];
+      for (const w of rawWords) {
+        const uw = wordFromSymbols(w, imgW, imgH);
+        if (uw && uw.text.length > 0) parsed.push(uw);
+      }
+    }
+  }
+  return parsed;
+}
+
+/**
+ * Flatten all words, cluster by vertical centerY, split runs by horizontal gaps, one boundingPoly per segment.
  * @param {Record<string, unknown>} fullText
  * @param {{ width: number; height: number }} imageDims
  * @returns {Array<{ description: string; boundingPoly: { vertices: { x: number; y: number }[] }; words: object[] }>}
@@ -188,45 +288,65 @@ function buildLineGroupsFromFullText(fullText, imageDims) {
   const imgW = imageDims.width || 1;
   const imgH = imageDims.height || 1;
   const pages = fullText.pages || [];
+
   /** @type {Array<{ description: string; boundingPoly: { vertices: { x: number; y: number }[] }; words: object[] }>} */
   const items = [];
+  let totalWords = 0;
+  let verticalLineTotal = 0;
 
   for (const page of pages) {
-    const blocks = page.blocks || [];
-    for (const block of blocks) {
-      const paragraphs = block.paragraphs || [];
-      for (const paragraph of paragraphs) {
-        const rawWords = paragraph.words || [];
-        const parsed = [];
-        for (const w of rawWords) {
-          const uw = wordFromSymbols(w, imgW, imgH);
-          if (uw && uw.text.length > 0) parsed.push(uw);
-        }
-        if (parsed.length === 0) continue;
+    const parsed = collectWordsFromPage(page, imgW, imgH);
+    totalWords += parsed.length;
+    const { verticalLines, horizontalSegments } = clusterWordsIntoVisualLines(parsed);
+    verticalLineTotal += verticalLines.length;
 
-        const lineClusters = clusterWordsIntoLines(parsed);
-        for (const line of lineClusters) {
-          const byX = [...line.words].sort((a, b) => a.rect.minX - b.rect.minX);
-          const segments = splitWordsByHorizontalGap(byX, imgW);
-          for (const seg of segments) {
-            const union = unionRects(seg.map((s) => s.rect));
-            if (!union) continue;
-            const description = seg
-              .map((s) => s.text)
-              .join(' ')
-              .replace(/\s+/g, ' ')
-              .trim();
-            if (!description) continue;
-            items.push({
-              description,
-              boundingPoly: { vertices: rectToVertices(union) },
-              words: seg.map((s) => s.word),
-            });
-          }
-        }
-      }
+    for (const seg of horizontalSegments) {
+      const rtl = lineLooksMostlyHebrew(seg);
+      const ordered = sortWordsInLineByReadingOrder(seg, rtl);
+      const union = unionRects(ordered.map((s) => s.rect));
+      if (!union) continue;
+      const description = ordered
+        .map((s) => s.text)
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (!description) continue;
+      items.push({
+        description,
+        boundingPoly: { vertices: rectToVertices(union) },
+        words: ordered.map((s) => s.word),
+      });
     }
   }
+
+  items.sort((a, b) => {
+    const va = a.boundingPoly && a.boundingPoly.vertices;
+    const vb = b.boundingPoly && b.boundingPoly.vertices;
+    const ya = va && va.length ? Math.min(...va.map((v) => v.y || 0)) : 0;
+    const yb = vb && vb.length ? Math.min(...vb.map((v) => v.y || 0)) : 0;
+    return ya - yb;
+  });
+
+  console.log('[ocr-group] ocr_raw_word_count', totalWords);
+  console.log('[ocr-group] line_groups_before_horizontal_gap_filter', verticalLineTotal);
+  console.log('[ocr-group] line_groups_after_horizontal_gap_filter', items.length);
+  const sample = items.slice(0, 10).map((it) => {
+    const v = it.boundingPoly && it.boundingPoly.vertices;
+    let boundingBox = null;
+    if (v && v.length) {
+      const xs = v.map((p) => Number(p.x) || 0);
+      const ys = v.map((p) => Number(p.y) || 0);
+      boundingBox = {
+        minX: Math.min(...xs),
+        minY: Math.min(...ys),
+        maxX: Math.max(...xs),
+        maxY: Math.max(...ys),
+      };
+    }
+    return { text: it.description, boundingBox };
+  });
+  console.log('[ocr-group] first_10_grouped_lines_with_boxes', sample);
+
   return items;
 }
 
