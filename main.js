@@ -14,7 +14,7 @@ const {
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
-const { runOcrOnImage, formatOcrTextReport, stringifyRawResponse } = require('./googleVision.js');
+const { runOcrOnImage, formatOcrTextReport, stringifyRawResponse, buildLineOverlayItems } = require('./googleVision.js');
 
 const SHORTCUT = 'CommandOrControl+Shift+Z';
 const CAPTURES_DIR = path.join(app.getPath('documents'), 'screen-translator-captures');
@@ -87,10 +87,8 @@ async function runOcrForScreenshot(pngPath, imageDims) {
   console.log('OCR finished', pngPath);
 
   try {
-    const annotations = (ocr.rawResponse && ocr.rawResponse.textAnnotations) || [];
-    // textAnnotations[0] is the full block; the rest are individual items.
-    const items = annotations.slice(1);
-    showOverlay(items, imageDims);
+    const lineItems = buildLineOverlayItems(ocr.rawResponse, imageDims);
+    showOverlay(lineItems, imageDims);
   } catch (err) {
     console.error('Overlay error', err.message || err);
   }

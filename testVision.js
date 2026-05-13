@@ -1,6 +1,6 @@
 /**
  * Local OCR smoke test using Application Default Credentials (ADC).
- * Run: gcloud auth application-default login
+ * Uses documentTextDetection (same as the app). Run: gcloud auth application-default login
  * Do not set GOOGLE_APPLICATION_CREDENTIALS or use JSON key files.
  */
 
