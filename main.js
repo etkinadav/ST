@@ -15,6 +15,7 @@ const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 const { runOcrOnImage, formatOcrTextReport, stringifyRawResponse, buildLineOverlayItems } = require('./googleVision.js');
+const { translateOcrLineItems, DEFAULT_TARGET_LANGUAGE } = require('./translateService.js');
 
 const SHORTCUT = 'CommandOrControl+Shift+Z';
 const CAPTURES_DIR = path.join(app.getPath('documents'), 'screen-translator-captures');
@@ -88,7 +89,9 @@ async function runOcrForScreenshot(pngPath, imageDims) {
 
   try {
     const lineItems = buildLineOverlayItems(ocr.rawResponse, imageDims);
-    showOverlay(lineItems, imageDims);
+    const targetLang = process.env.SCREEN_TRANSLATOR_TARGET_LANG || DEFAULT_TARGET_LANGUAGE;
+    const overlayItems = await translateOcrLineItems(lineItems, { targetLanguageCode: targetLang });
+    showOverlay(overlayItems, imageDims);
   } catch (err) {
     console.error('Overlay error', err.message || err);
   }

@@ -185,7 +185,10 @@
           el.style.top = top + 'px';
           el.style.width = width + 'px';
           el.style.height = height + 'px';
-          const text = item.description || '';
+          const text = item.translatedText != null ? String(item.translatedText).trim() : '';
+          if (!text) {
+            continue;
+          }
           const fontPx = fitFontSizeToSingleLine(text, width, height);
           el.style.fontSize = fontPx + 'px';
           el.textContent = text;
